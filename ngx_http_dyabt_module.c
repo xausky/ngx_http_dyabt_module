@@ -18,10 +18,17 @@ typedef struct {
 }ngx_http_dyabt_testing_t;
 
 typedef struct {
+    ngx_http_dyabt_parser_ptr_t    parser;
+    ngx_str_t                      name;
+}ngx_http_dyabt_parser_t;
+
+typedef struct {
     ngx_event_t                    timer;
     ngx_hash_t                    *hash;
     ngx_pool_t                    *pool;
     ngx_array_t                   *domains;
+    ngx_hash_t                    *parsers;
+    ngx_pool_t                    *global_pool;
 }ngx_http_dyabt_global_ctx_t;
 
 typedef struct {
@@ -73,6 +80,27 @@ ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf);
 
 static void *
 ngx_http_dyabt_create_main_conf(ngx_conf_t *cf);
+
+static ngx_int_t
+ngx_http_dyabt_do_finish(ngx_http_request_t *r, ngx_int_t status, ngx_str_t *rv);
+
+static ngx_int_t
+ngx_http_dyabt_interface_handler(ngx_http_request_t *r);
+
+static ngx_buf_t *
+ngx_http_dyabt_read_body_from_file(ngx_http_request_t *r);
+
+static ngx_buf_t *
+ngx_http_dyabt_read_body(ngx_http_request_t *r);
+
+static void
+ngx_http_dyabt_body_handler(ngx_http_request_t *r);
+
+static ngx_int_t
+ngx_http_dyabt_do_post(ngx_http_request_t *r);
+
+static void
+ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body);
 
 static ngx_http_dyabt_global_ctx_t ngx_http_dyabt_global_ctx;
 
@@ -133,12 +161,330 @@ ngx_http_dyabt_interface(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     dmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_dyabt_module);
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
-    //TODO
-    //clcf->handler = ngx_http_dyabt_interface_handler;
+    clcf->handler = ngx_http_dyabt_interface_handler;
     dmcf->enable = 1;
 
     return NGX_CONF_OK;
 }
+
+static ngx_int_t
+ngx_http_dyabt_interface_handler(ngx_http_request_t *r)
+{
+    ngx_int_t             status;
+    ngx_str_t             rv = ngx_string("xausky.example.org");
+    if(r->uri.len == 9 && ngx_strncasecmp(r->uri.data, (u_char*)"/testings",9) == 0){
+        switch (r->method) {
+            case NGX_HTTP_GET:
+                status = NGX_HTTP_NOT_FOUND;
+                break;
+            case NGX_HTTP_POST:
+                return ngx_http_dyabt_do_post(r);
+                break;
+            case NGX_HTTP_DELETE:
+                status = NGX_HTTP_NOT_FOUND;
+                break;
+            default:
+                status = NGX_HTTP_NOT_FOUND;
+                break;
+        }
+    }else{
+        status = NGX_HTTP_NOT_FOUND;
+    }
+    return ngx_http_dyabt_do_finish(r, status, &rv);
+}
+
+static ngx_int_t
+ngx_http_dyabt_do_finish(ngx_http_request_t *r, ngx_int_t status, ngx_str_t *rv)
+{
+    ngx_int_t             rc;
+    ngx_buf_t            *b;
+    ngx_chain_t           out;
+    r->headers_out.status = status;
+    r->headers_out.content_length_n = rv->len;
+
+    rc = ngx_http_send_header(r);
+    if (rc == NGX_ERROR || rc > NGX_OK) {
+        return rc;
+    }
+
+    if (rv->len == 0) {
+        return ngx_http_send_special(r, NGX_HTTP_FLUSH);
+    }
+
+    b = ngx_create_temp_buf(r->pool, rv->len);
+    if (b == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    b->pos = rv->data;
+    b->last = rv->data + rv->len;
+    b->last_buf = 1;
+
+    out.buf = b;
+    out.next = NULL;
+    ngx_http_finalize_request(r, ngx_http_output_filter(r, &out));
+    return rc;
+}
+
+static ngx_int_t
+ngx_http_dyabt_do_post(ngx_http_request_t *r)
+{
+    ngx_int_t  rc;
+    ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"ngx_http_dyabt_do_post");
+
+    rc = ngx_http_read_client_request_body(r, ngx_http_dyabt_body_handler);
+
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+        return rc;
+    }
+    return NGX_DONE;
+}
+
+static void
+ngx_http_dyabt_body_handler(ngx_http_request_t *r)
+{
+    ngx_buf_t               *body;
+    ngx_str_t                info;
+    if (r->request_body->temp_file) {
+        body = ngx_http_dyabt_read_body_from_file(r);
+    } else {
+        body = ngx_http_dyabt_read_body(r);
+    }
+    info.len = body->last - body->pos;
+    info.data = (u_char *)body->pos;
+    ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"body:%V\n",&info);
+    ngx_http_dyabt_parser_testing(r,body);
+}
+
+static ngx_int_t
+ngx_http_dyabt_parser_line(u_char **p,u_char *last,
+    ngx_str_t *one, ngx_str_t *two){
+    u_char            *start;
+    ngx_int_t          count;
+    ngx_int_t          len;
+    start = *p;
+    count = 0;
+    len = 0;
+    while(*p <= last){
+        if(**p == '\r' || **p == '\n' || **p == ','){
+            if(len == 0){
+                ++start;
+            }else{
+                if(count == 0){
+                    one->len = len;
+                    one->data = start;
+                }else if(count == 1){
+                    two->len = len;
+                    two->data = start;
+                }
+                len = 0;
+                start = *p + 1;
+                ++count;
+            }
+            if(**p=='\n'){
+                ++*p;
+                break;
+            }
+        }else{
+            ++len;
+        }
+        ++*p;
+    }
+    return count;
+}
+
+static void
+ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body)
+{
+    ngx_str_t                 domain,parser,response,min_str,max_str;
+    ngx_int_t                 result,status,min,max;
+    u_char                   *p;
+    ngx_http_dyabt_testing_t *testing;
+    ngx_http_dyabt_case_t    *testing_case;
+    ngx_hash_key_t           *domain_hash;
+    ngx_hash_init_t           hash_init;
+    p = body->pos;
+    ngx_memzero(&domain,sizeof(ngx_str_t));
+    ngx_memzero(&parser,sizeof(ngx_str_t));
+    status = ngx_http_dyabt_parser_line(&p,body->last,&domain,&parser);
+    ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"domain:%V->%d,parser:%V->%d\n",&domain,domain.len,&parser,parser.len);
+    if(status != 2){
+         ngx_str_set(&response,"domain or parser not found.");
+         ngx_http_dyabt_do_finish(r,NGX_HTTP_BAD_REQUEST,&response);
+         return;
+    }
+    testing = ngx_pnalloc(ngx_http_dyabt_global_ctx.pool,
+        sizeof(ngx_http_dyabt_testing_t));
+    if(testing == NULL){
+        ngx_str_set(&response,"memory alloc fail.");
+        ngx_http_dyabt_do_finish(r,NGX_HTTP_INTERNAL_SERVER_ERROR,&response);
+        return;
+    }
+    testing->parser = ngx_hash_find(ngx_http_dyabt_global_ctx.parsers,
+        ngx_hash_key(parser.data,parser.len),
+        parser.data,parser.len);
+    if(testing->parser == NULL){
+        ngx_str_set(&response,"parser not support.");
+        ngx_http_dyabt_do_finish(r,NGX_HTTP_BAD_REQUEST,&response);
+        return;
+    }
+    testing->cases = ngx_pnalloc(
+        ngx_http_dyabt_global_ctx.pool,
+        sizeof(ngx_array_t));
+    if(testing->cases == NULL){
+        ngx_str_set(&response,"memory alloc fail.");
+        ngx_http_dyabt_do_finish(r,NGX_HTTP_INTERNAL_SERVER_ERROR,&response);
+        return;
+    }
+    result = ngx_array_init(testing->cases,
+        ngx_http_dyabt_global_ctx.pool,
+        4, sizeof(ngx_http_dyabt_case_t));
+    if(result == NGX_ERROR){
+        ngx_str_set(&response,"array init fail.");
+        ngx_http_dyabt_do_finish(r,NGX_HTTP_INTERNAL_SERVER_ERROR,&response);
+        return;
+    }
+    while(ngx_http_dyabt_parser_line(&p,body->last,&min_str,&max_str)==2){
+        ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"min:%V->%d,max:%V->%d\n",&min_str,min_str.len,&max_str,max_str.len);
+        min = ngx_atoi(min_str.data,min_str.len);
+        max = ngx_atoi(max_str.data,max_str.len);
+        if(min==NGX_ERROR || max == NGX_ERROR){
+            ngx_str_set(&response,"min or max is invalid number.");
+            ngx_http_dyabt_do_finish(r,NGX_HTTP_BAD_REQUEST,&response);
+            return;
+        }
+        testing_case = ngx_array_push(testing->cases);
+        testing_case->min = min;
+        testing_case->max = max;
+    }
+    domain_hash = ngx_array_push(ngx_http_dyabt_global_ctx.domains);
+    domain_hash->key.len = domain.len;
+    domain_hash->key.data = ngx_pnalloc(ngx_http_dyabt_global_ctx.pool,domain.len);
+    if(domain_hash->key.data == NULL){
+        ngx_str_set(&response,"memory alloc fail.");
+        ngx_http_dyabt_do_finish(r,NGX_HTTP_INTERNAL_SERVER_ERROR,&response);
+        return;
+    }
+    ngx_memcpy(domain_hash->key.data,domain.data,domain.len);
+    domain_hash->key_hash = ngx_hash_key(domain_hash->key.data,domain_hash->key.len);
+    domain_hash->value = testing;
+    // apply domain hash
+    ngx_memzero(&hash_init,sizeof(ngx_hash_init_t));
+    hash_init.key = ngx_hash_key;
+    hash_init.max_size = 512;
+    hash_init.bucket_size = ngx_align(64, ngx_cacheline_size);
+    hash_init.name = "ngx_http_dyabt_domains_hash_table";
+    hash_init.pool = ngx_http_dyabt_global_ctx.pool;
+    hash_init.temp_pool = r->pool;
+    result = ngx_hash_init(&hash_init,
+        ngx_http_dyabt_global_ctx.domains->elts,
+        ngx_http_dyabt_global_ctx.domains->nelts
+    );
+    ngx_http_dyabt_global_ctx.hash = hash_init.hash;
+    ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"domains:%V->%d",&domain_hash->key,domain_hash->key.len);
+    ngx_str_set(&response,"success.");
+    ngx_http_dyabt_do_finish(r,NGX_HTTP_OK,&response);
+}
+
+static ngx_buf_t *
+ngx_http_dyabt_read_body(ngx_http_request_t *r)
+{
+    size_t        len;
+    ngx_buf_t    *buf, *next, *body;
+    ngx_chain_t  *cl;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "[dyups] interface read post body");
+
+    cl = r->request_body->bufs;
+    buf = cl->buf;
+
+    if (cl->next == NULL) {
+
+        return buf;
+
+    } else {
+
+        next = cl->next->buf;
+        len = (buf->last - buf->pos) + (next->last - next->pos);
+
+        body = ngx_create_temp_buf(r->pool, len);
+        if (body == NULL) {
+            return NULL;
+        }
+
+        body->last = ngx_cpymem(body->last, buf->pos, buf->last - buf->pos);
+        body->last = ngx_cpymem(body->last, next->pos, next->last - next->pos);
+    }
+
+    return body;
+}
+
+
+static ngx_buf_t *
+ngx_http_dyabt_read_body_from_file(ngx_http_request_t *r)
+{
+    size_t        len;
+    ssize_t       size;
+    ngx_buf_t    *buf, *body;
+    ngx_chain_t  *cl;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "[dyups] interface read post body from file");
+
+    len = 0;
+    cl = r->request_body->bufs;
+
+    while (cl) {
+
+        buf = cl->buf;
+
+        if (buf->in_file) {
+            len += buf->file_last - buf->file_pos;
+
+        } else {
+            len += buf->last - buf->pos;
+        }
+
+        cl = cl->next;
+    }
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "[dyups] interface read post body file size %ui", len);
+
+    body = ngx_create_temp_buf(r->pool, len);
+    if (body == NULL) {
+        return NULL;
+    }
+
+    cl = r->request_body->bufs;
+
+    while (cl) {
+
+        buf = cl->buf;
+
+        if (buf->in_file) {
+
+            size = ngx_read_file(buf->file, body->last,
+                                 buf->file_last - buf->file_pos, buf->file_pos);
+
+            if (size == NGX_ERROR) {
+                return NULL;
+            }
+
+            body->last += size;
+
+        } else {
+
+            body->last = ngx_cpymem(body->last, buf->pos, buf->last - buf->pos);
+        }
+
+        cl = cl->next;
+    }
+
+    return body;
+}
+
 
 static char *
 ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
@@ -260,7 +606,7 @@ ngx_http_dyabt_set_handler(ngx_http_request_t *r, ngx_http_variable_value_t *v, 
     }else{
         value = *(scf->domain);
     }
-    result = 0;
+    result = -1;
     testing = ngx_hash_find(ngx_http_dyabt_global_ctx.hash,
         ngx_hash_key(value.data,value.len),
         value.data,value.len);
@@ -274,31 +620,18 @@ ngx_http_dyabt_set_handler(ngx_http_request_t *r, ngx_http_variable_value_t *v, 
             }
         }
         if(result>=size){
-            result = 0;
-        }else{
-            result++;
+            result = -1;
         }
     }
-    v->len = 2;
-    v->data = ngx_pnalloc(r->pool, v->len);
-    ngx_snprintf(v->data,2,"%d",result);
+    ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"ngx_http_dyabt_set_handler:%V->%d",&value,value.len);
+    v->data = ngx_pnalloc(r->pool, 10);
+    v->len = ngx_snprintf(v->data,10,"%d",result) - v->data;
     return NGX_OK;
 }
 
-static ngx_int_t ngx_http_dyabt_init_process(ngx_cycle_t *cycle)
-{
+static ngx_int_t ngx_http_dyabt_make_conf(ngx_pool_t *temp_pool){
     ngx_hash_init_t             hash_init;
     ngx_int_t                   result;
-    ngx_event_t                 *timer;
-    ngx_pool_t                  *temp_pool;
-
-    ngx_hash_key_t              *test_domain;
-    ngx_http_dyabt_case_t       *test_case;
-    ngx_http_dyabt_testing_t    *test_testing;
-    ngx_str_t                   test_key = ngx_string("xausky.example.org");
-
-    ngx_http_dyabt_global_ctx.pool = ngx_create_pool(
-        (NGX_DEFAULT_POOL_SIZE*1024),cycle->log);
     ngx_http_dyabt_global_ctx.domains = ngx_pnalloc(
         ngx_http_dyabt_global_ctx.pool,
         sizeof(ngx_array_t));
@@ -309,30 +642,6 @@ static ngx_int_t ngx_http_dyabt_init_process(ngx_cycle_t *cycle)
     if(result == NGX_ERROR){
         return NGX_ERROR;
     }
-    /*
-    * Temp test data;
-    */
-    test_testing = ngx_pnalloc(ngx_http_dyabt_global_ctx.pool,
-        sizeof(ngx_http_dyabt_testing_t));
-    test_testing->parser = ngx_http_dyabt_uid_parser;
-    test_testing->cases = ngx_pnalloc(
-        ngx_http_dyabt_global_ctx.pool,
-        sizeof(ngx_array_t));
-    result = ngx_array_init(test_testing->cases,
-        ngx_http_dyabt_global_ctx.pool,
-        4, sizeof(ngx_http_dyabt_case_t));
-    if(result == NGX_ERROR){
-        return NGX_ERROR;
-    }
-    test_case = ngx_array_push(test_testing->cases);
-    test_case->min = 0;
-    test_case->max = 10;
-    test_domain = ngx_array_push(ngx_http_dyabt_global_ctx.domains);
-    test_domain->key = test_key;
-    test_domain->key_hash = ngx_hash_key(test_key.data,test_key.len);
-    test_domain->value = test_testing;
-
-    temp_pool = ngx_create_pool(NGX_DEFAULT_POOL_SIZE, cycle->log);
     ngx_memzero(&hash_init,sizeof(ngx_hash_init_t));
     hash_init.key = ngx_hash_key;
     hash_init.max_size = 512;
@@ -344,12 +653,68 @@ static ngx_int_t ngx_http_dyabt_init_process(ngx_cycle_t *cycle)
         ngx_http_dyabt_global_ctx.domains->elts,
         ngx_http_dyabt_global_ctx.domains->nelts
     );
+    if(result == NGX_ERROR){
+        return NGX_ERROR;
+    }
     ngx_http_dyabt_global_ctx.hash = hash_init.hash;
+    return NGX_OK;
+}
+
+static ngx_int_t ngx_http_dyabt_init_process(ngx_cycle_t *cycle)
+{
+    ngx_int_t                   result;
+    ngx_event_t                 *timer;
+    ngx_pool_t                  *temp_pool;
+    ngx_hash_key_t              *parser;
+    ngx_array_t                 parsers;
+    ngx_hash_init_t             parser_hash_init;
+
+    ngx_http_dyabt_global_ctx.global_pool = ngx_create_pool(
+        (NGX_DEFAULT_POOL_SIZE*1024),cycle->log);
+    ngx_memzero(&parsers,sizeof(ngx_array_t));
+    result = ngx_array_init(&parsers,
+        ngx_http_dyabt_global_ctx.global_pool,
+        4, sizeof(ngx_hash_key_t));
+    if(result == NGX_ERROR){
+        return NGX_ERROR;
+    }
+    // add parser function
+    parser = ngx_array_push(&parsers);
+    ngx_str_set(&parser->key,"header_x_uid");
+    parser->key_hash = ngx_hash_key(parser->key.data,parser->key.len);
+    parser->value = ngx_http_dyabt_uid_parser;
+    // add parser hash map
+    temp_pool = ngx_create_pool(NGX_DEFAULT_POOL_SIZE, cycle->log);
+    ngx_memzero(&parser_hash_init,sizeof(ngx_hash_init_t));
+    parser_hash_init.key = ngx_hash_key;
+    parser_hash_init.max_size = 512;
+    parser_hash_init.bucket_size = ngx_align(64, ngx_cacheline_size);
+    parser_hash_init.name = "ngx_http_dyabt_parser_hash_table";
+    parser_hash_init.pool = ngx_http_dyabt_global_ctx.global_pool;
+    parser_hash_init.temp_pool = temp_pool;
+    result = ngx_hash_init(&parser_hash_init,
+        parsers.elts,
+        parsers.nelts
+    );
+    if(result == NGX_ERROR){
+        return NGX_ERROR;
+    }
+    ngx_http_dyabt_global_ctx.parsers = parser_hash_init.hash;
+    // add parser end
+    // add domain map
+    ngx_http_dyabt_global_ctx.pool = ngx_create_pool(
+        (NGX_DEFAULT_POOL_SIZE*1024),cycle->log);
+    result = ngx_http_dyabt_make_conf(temp_pool);
+    if(result == NGX_ERROR){
+        return NGX_ERROR;
+    }
+    // add timer
     timer = &ngx_http_dyabt_global_ctx.timer;
     ngx_memzero(timer,sizeof(ngx_event_t));
     timer->handler = ngx_http_dyabt_on_timer;
     timer->log = cycle->log;
     ngx_add_timer(timer,3000);
+    ngx_destroy_pool(temp_pool);
     return NGX_OK;
 }
 
