@@ -129,7 +129,14 @@ ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body);
 static ngx_int_t
 ngx_http_dyabt_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data);
 
-static ngx_int_t ngx_http_dyabt_make_conf(ngx_log_t *log);
+static ngx_int_t
+ngx_http_dyabt_make_conf(ngx_log_t *log);
+
+static ngx_int_t
+ngx_http_dyabt_do_delete(ngx_http_request_t *r);
+
+static ngx_int_t
+ngx_http_dyabt_do_get(ngx_http_request_t *r);
 
 static ngx_http_dyabt_global_ctx_t ngx_http_dyabt_global_ctx;
 
@@ -200,18 +207,18 @@ static ngx_int_t
 ngx_http_dyabt_interface_handler(ngx_http_request_t *r)
 {
     ngx_int_t             status;
-    ngx_str_t             rv = ngx_string("xausky.example.org");
+    ngx_str_t             rv = ngx_string("not found");
     if(r->uri.len == 9 && ngx_strncasecmp(r->uri.data, (u_char*)"/testings",9) == 0){
         switch (r->method) {
             case NGX_HTTP_GET:
-                status = NGX_HTTP_NOT_FOUND;
-                break;
+                status = ngx_http_dyabt_do_get(r);
+                return status;
             case NGX_HTTP_POST:
                 return ngx_http_dyabt_do_post(r);
-                break;
+                return status;
             case NGX_HTTP_DELETE:
-                status = NGX_HTTP_NOT_FOUND;
-                break;
+                status = ngx_http_dyabt_do_delete(r);
+                return status;
             default:
                 status = NGX_HTTP_NOT_FOUND;
                 break;
@@ -267,6 +274,77 @@ ngx_http_dyabt_do_post(ngx_http_request_t *r)
         return rc;
     }
     return NGX_DONE;
+}
+
+static ngx_int_t
+ngx_http_dyabt_do_delete(ngx_http_request_t *r)
+{
+    ngx_int_t             status;
+    ngx_str_t             result;
+    if(ngx_http_dyabt_global_ctx.shm == NULL){
+        status = NGX_HTTP_SERVICE_UNAVAILABLE;
+        ngx_str_set(&result,"sherad memory not initialized.");
+        ngx_http_dyabt_do_finish(r,status,&result);
+        return NGX_ERROR;
+    }
+    if(!ngx_shmtx_trylock(&ngx_http_dyabt_global_ctx.lock)){
+        status = NGX_HTTP_SERVICE_UNAVAILABLE;
+        ngx_str_set(&result,"sherad memory lock can't locked.");
+        ngx_http_dyabt_do_finish(r,status,&result);
+        return NGX_ERROR;
+    }
+    ngx_http_dyabt_global_ctx.shm->node_len = 0;
+    ngx_http_dyabt_global_ctx.shm->version++;
+    ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
+    status = NGX_HTTP_OK;
+    ngx_str_set(&result,"success.");
+    ngx_http_dyabt_do_finish(r,status,&result);
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_dyabt_do_get(ngx_http_request_t *r)
+{
+    u_char                    *p,*last;
+    ngx_int_t                  status,node_index,case_index,size,len;
+    ngx_str_t                  result,domain,parser;
+    ngx_http_dyabt_shm_t      *shm;
+    ngx_http_dyabt_shm_node_t *node;
+    if(ngx_http_dyabt_global_ctx.shm == NULL){
+        status = NGX_HTTP_SERVICE_UNAVAILABLE;
+        ngx_str_set(&result,"sherad memory not initialized.");
+        ngx_http_dyabt_do_finish(r,status,&result);
+        return NGX_ERROR;
+    }
+    if(!ngx_shmtx_trylock(&ngx_http_dyabt_global_ctx.lock)){
+        status = NGX_HTTP_SERVICE_UNAVAILABLE;
+        ngx_str_set(&result,"sherad memory lock can't locked.");
+        ngx_http_dyabt_do_finish(r,status,&result);
+        return NGX_ERROR;
+    }
+    shm = ngx_http_dyabt_global_ctx.shm;
+    size = 512*shm->node_len;
+    result.len = 0;
+    result.data = ngx_pnalloc(r->pool,size);
+    p = result.data;
+    last = p + size;
+    for(node_index=0;node_index<shm->node_len;++node_index){
+        node = &shm->node[node_index];
+        domain.len = node->domain_len;
+        domain.data = node->domain;
+        parser.len = node->parser_len;
+        parser.data = node->parser;
+        p = ngx_snprintf(p,last-p,"%V,%V\n",&domain,&parser);
+        for(case_index=0;case_index<node->cases_len;++case_index){
+            p = ngx_snprintf(p,last-p,"%d,%d\n",node->cases[case_index].min,node->cases[case_index].max);
+        }
+        p = ngx_snprintf(p,last-p,"\n");
+    }
+    result.len = p - result.data;
+    ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
+    status = NGX_HTTP_OK;
+    ngx_http_dyabt_do_finish(r,status,&result);
+    return NGX_OK;
 }
 
 static void
