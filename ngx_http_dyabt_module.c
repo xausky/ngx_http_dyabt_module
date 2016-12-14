@@ -444,12 +444,15 @@ ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body)
             ngx_http_dyabt_global_ctx.shm->node[ngx_http_dyabt_global_ctx.shm->node_len] = node;
             ngx_http_dyabt_global_ctx.shm->node_len++;
             ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
+            status = NGX_HTTP_OK;
+            ngx_str_set(&response,"success.");
+        }else{
+            status = NGX_HTTP_SERVICE_UNAVAILABLE;
+            ngx_str_set(&response,"shared memory lock can't locked.");
         }
-        status = NGX_HTTP_OK;
-        ngx_str_set(&response,"success.");
     }else{
-        status = NGX_HTTP_OK;
-        ngx_str_set(&response,"sherad memory not init.");
+        status = NGX_HTTP_SERVICE_UNAVAILABLE;
+        ngx_str_set(&response,"shared memory not initialized.");
     }
     ngx_http_dyabt_do_finish(r,status,&response);
 }
