@@ -56,9 +56,6 @@ typedef struct {
 }ngx_http_dyabt_global_ctx_t;
 
 typedef struct {
-}ngx_http_dyabt_loc_conf_t;
-
-typedef struct {
     ngx_str_t                     *domain;
     ngx_array_t                   *lengths;
     ngx_array_t                   *values;
@@ -80,12 +77,6 @@ ngx_http_dyabt_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
 static ngx_int_t
 ngx_http_dyabt_set_handler(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data);
-
-static void *
-ngx_http_rewrite_create_loc_conf(ngx_conf_t *cf);
-
-static char *
-ngx_http_rewrite_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 
 static char *
 ngx_http_dyabt_value(ngx_conf_t *cf, ngx_http_dyabt_set_conf_t *scf, ngx_str_t *value);
@@ -150,8 +141,8 @@ static ngx_http_module_t  ngx_http_dyabt_module_ctx = {
     NULL,                             /* create server configuration */
     NULL,                             /* merge server configuration */
 
-    ngx_http_rewrite_create_loc_conf, /* create location configuration */
-    ngx_http_rewrite_merge_loc_conf   /* merge location configuration */
+    NULL,                             /* create location configuration */
+    NULL                              /* merge location configuration */
 };
 
 static ngx_command_t  ngx_http_dyabt_commands[] = {
@@ -548,6 +539,7 @@ ngx_http_dyabt_read_body_from_file(ngx_http_request_t *r)
 static char *
 ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
 {
+    ngx_shm_t                    shm;
     ngx_shm_zone_t              *shm_zone;
     ngx_http_dyabt_main_conf_t  *dmcf = conf;
     ngx_str_t                   shm_name = ngx_string("ngx_http_dyabt_shm");
@@ -555,52 +547,32 @@ ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
     if(dmcf->enable == NGX_CONF_UNSET){
         dmcf->enable = 0;
     }
-    /* sherad memory*/
-    ngx_http_dyabt_global_ctx.shm = NULL;
-    ngx_http_dyabt_global_ctx.version = -1;
-    shm_zone = ngx_shared_memory_add(cf,&shm_name,NGX_DEFAULT_POOL_SIZE+sizeof(ngx_http_dyabt_shm_t),&ngx_http_dyabt_module);
-    if (shm_zone == NULL) {
+    /* initializ sherad memory*/
+    ngx_memzero(&shm,sizeof(ngx_shm_t));
+    ngx_str_set(&shm.name,"ngx_http_dyabt_shm");
+    shm.size = sizeof(ngx_http_dyabt_shm_t);
+    shm.log = cf->log;
+    if(ngx_shm_alloc(&shm)!=NGX_OK){
         return NGX_CONF_ERROR;
     }
-    shm_zone->init = ngx_http_dyabt_init_shm_zone;
-    shm_zone->data = &ngx_http_dyabt_global_ctx;
-    //ngx_http_dyabt_make_conf(cf->log);
-    return NGX_CONF_OK;
-}
+    ngx_log_error(NGX_LOG_INFO,cf->log,0,"shared memory alloc success.");
+    ngx_http_dyabt_global_ctx.shm = (ngx_http_dyabt_shm_t *)shm.addr;
 
-static ngx_int_t
-ngx_http_dyabt_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data)
-{
-    ngx_http_dyabt_global_ctx_t *octx = data;
-    ngx_http_dyabt_global_ctx_t *ctx;
-    ngx_slab_pool_t             *shpool;
-
-    ctx = shm_zone->data;
-    if(octx){
-        ctx->shm = octx->shm;
-        return NGX_OK;
-    }
-    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
-    if (shm_zone->shm.exists) {
-        ctx->shm = shpool->data;
-        return NGX_OK;
-    }
-    ctx->shm = ngx_slab_alloc(shpool, sizeof(ngx_http_dyabt_shm_t));
-    printf("shm:%ld,%d",(long int)ctx->shm,ngx_pid);
-    if (ctx->shm == NULL) {
-        return NGX_ERROR;
-    }
-    shpool->data = ctx->shm;
-    ctx->shm->lock.lock = 0;
-    if(ngx_shmtx_create(&ctx->lock,
-        &ctx->shm->lock,
+    /* initializ lock */
+    ngx_http_dyabt_global_ctx.shm->lock.lock = 0;
+    if(ngx_shmtx_create(&ngx_http_dyabt_global_ctx.lock,
+        &ngx_http_dyabt_global_ctx.shm->lock,
         (u_char*)"ngx_http_dyabt_shm_lock") != NGX_OK)
     {
-        return NGX_ERROR;
+        return NGX_CONF_ERROR;
     }
-    ctx->shm->node_len = 0;
-    ctx->shm->version = 0;
-    return NGX_OK;
+
+    /* initializ version */
+    ngx_http_dyabt_global_ctx.shm->node_len = 0;
+    ngx_http_dyabt_global_ctx.shm->version = 0;
+    ngx_http_dyabt_global_ctx.version = -1;
+
+    return NGX_CONF_OK;
 }
 
 static void *
@@ -615,31 +587,12 @@ ngx_http_dyabt_create_main_conf(ngx_conf_t *cf)
     return dmcf;
 }
 
-static void *
-ngx_http_rewrite_create_loc_conf(ngx_conf_t *cf){
-    ngx_http_dyabt_loc_conf_t *conf;
-    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_dyabt_loc_conf_t));
-    if (conf == NULL) {
-        return NULL;
-    }
-    return conf;
-}
-
-static char *
-ngx_http_rewrite_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
-{
-    ngx_http_dyabt_loc_conf_t *prev = parent;
-    ngx_http_dyabt_loc_conf_t *conf = child;
-    return NGX_CONF_OK;
-}
-
 static char *
 ngx_http_dyabt_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_int_t                            index;
     ngx_str_t                           *value;
     ngx_http_variable_t                 *v;
-    ngx_http_dyabt_loc_conf_t           *lcf = conf;
     ngx_str_t                           *domain;
     ngx_http_dyabt_set_conf_t           *scf;
     value = cf->args->elts;
@@ -697,12 +650,10 @@ ngx_http_dyabt_set_handler(ngx_http_request_t *r, ngx_http_variable_value_t *v, 
     ngx_int_t                           result;
     ngx_str_t                           value;
     ngx_http_dyabt_set_conf_t           *scf;
-    ngx_http_dyabt_loc_conf_t           *lcf;
     ngx_http_dyabt_testing_t            *testing;
     ngx_http_dyabt_case_t               *cases;
     ngx_int_t                           size;
     ngx_int_t                           testing_result = -1;
-    lcf = ngx_http_get_module_loc_conf(r, ngx_http_dyabt_module);
     scf = (ngx_http_dyabt_set_conf_t*)data;
     if(scf->values_count){
         if (ngx_http_script_run(r, &value, scf->lengths->elts, 0, scf->values->elts) == NULL)
