@@ -682,7 +682,6 @@ ngx_http_dyabt_set_handler(ngx_http_request_t *r, ngx_http_variable_value_t *v, 
         //begin form 1 ,default is 0.
         result++;
     }
-    ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"ngx_http_dyabt_set_handler:%V->%d",&value,value.len);
     v->data = ngx_pnalloc(r->pool, 3);
     v->len = ngx_snprintf(v->data,3,"%d",result) - v->data;
     return NGX_OK;
