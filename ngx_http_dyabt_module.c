@@ -338,7 +338,7 @@ ngx_http_dyabt_do_get(ngx_http_request_t *r)
         for(case_index=0;case_index<node->cases_len;++case_index){
             p = ngx_snprintf(p,last-p,"%d,%d\n",node->cases[case_index].min,node->cases[case_index].max);
         }
-        p = ngx_snprintf(p,last-p,"\n");
+        p = ngx_snprintf(p,last-p,"---\n");
     }
     result.len = p - result.data;
     ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
