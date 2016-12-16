@@ -6,9 +6,11 @@
 
 ## 指令参考
 1. `dyabt_interface`
+
 配置于location块内，作为一个Handler提供Restful API同时也是该模块的开关指令,不配置该指令模块运行于disable模式，所有dyabt_set指令返回0。
 
 2. `dyabt_set <var> <domain>`
+
 配置于location块内，使用domain对应的规则解析当前请求并将结果存到var变量内。
 
 ## Nginx 配置参考
