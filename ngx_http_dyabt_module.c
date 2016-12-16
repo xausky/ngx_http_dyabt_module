@@ -628,6 +628,9 @@ ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
     if(dmcf->enable == NGX_CONF_UNSET){
         dmcf->enable = 0;
     }
+    if(!dmcf->enable){
+        return NGX_CONF_OK;
+    }
     /* initializ shared memory*/
     ngx_memzero(&shm,sizeof(ngx_shm_t));
     ngx_str_set(&shm.name,"ngx_http_dyabt_shm");
@@ -736,13 +739,20 @@ ngx_http_dyabt_value(ngx_conf_t *cf, ngx_http_dyabt_set_conf_t *scf, ngx_str_t *
 static ngx_int_t
 ngx_http_dyabt_set_handler(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data)
 {
-    ngx_int_t                           result;
-    ngx_str_t                           value;
+    ngx_int_t                            result;
+    ngx_str_t                            value;
     ngx_http_dyabt_set_conf_t           *scf;
     ngx_http_dyabt_testing_t            *testing;
     ngx_http_dyabt_case_t               *cases;
-    ngx_int_t                           size;
-    ngx_int_t                           testing_result = -1;
+    ngx_int_t                            size;
+    ngx_int_t                            testing_result = -1;
+    ngx_http_dyabt_main_conf_t          *dmcf;
+    dmcf = ngx_http_get_module_main_conf(r, ngx_http_dyabt_module);
+    if(!dmcf->enable){
+        v->data = (u_char*)"0";
+        v->len  = 1;
+        return NGX_OK;
+    }
     scf = (ngx_http_dyabt_set_conf_t*)data;
     if(scf->values_count){
         if (ngx_http_script_run(r, &value, scf->lengths->elts, 0, scf->values->elts) == NULL)
@@ -903,13 +913,18 @@ static ngx_int_t ngx_http_dyabt_make_conf(ngx_log_t *log)
 static ngx_int_t ngx_http_dyabt_init_process(ngx_cycle_t *cycle)
 {
     ngx_event_t                 *timer;
-    ngx_int_t                   result;
+    ngx_int_t                    result;
     ngx_pool_t                  *temp_pool;
     ngx_hash_key_t              *parser;
     ngx_shm_zone_t              *shm_zone;
-    ngx_shm_t                   shm;
-    ngx_array_t                 parsers;
-    ngx_hash_init_t             parser_hash_init;
+    ngx_shm_t                    shm;
+    ngx_array_t                  parsers;
+    ngx_hash_init_t              parser_hash_init;
+    ngx_http_dyabt_main_conf_t  *dmcf;
+    dmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_dyabt_module);
+    if(!dmcf->enable){
+        return NGX_OK;
+    }
     ngx_http_dyabt_global_ctx.global_pool = ngx_create_pool(
         (NGX_DEFAULT_POOL_SIZE*1024),cycle->log);
     ngx_memzero(&parsers,sizeof(ngx_array_t));
