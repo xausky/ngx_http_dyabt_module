@@ -27,20 +27,21 @@ typedef struct {
     ngx_str_t                      name;
 }ngx_http_dyabt_parser_t;
 
-typedef struct {
-    u_char                         domain[NGX_HTTP_DYABT_SHM_DOMAIN_SIZE];
-    u_char                         parser[NGX_HTTP_DYABT_SHM_PARSER_SIZE];
-    ngx_http_dyabt_case_t          cases[NGX_HTTP_DYABT_SHM_CASES_SIZE];
-    ngx_int_t                      domain_len;
-    ngx_int_t                      parser_len;
-    ngx_int_t                      cases_len;
+typedef struct ngx_http_dyabt_shm_node_s{
+    u_char                            domain[NGX_HTTP_DYABT_SHM_DOMAIN_SIZE];
+    u_char                            parser[NGX_HTTP_DYABT_SHM_PARSER_SIZE];
+    ngx_http_dyabt_case_t             cases[NGX_HTTP_DYABT_SHM_CASES_SIZE];
+    ngx_int_t                         domain_len;
+    ngx_int_t                         parser_len;
+    ngx_int_t                         cases_len;
+    struct ngx_http_dyabt_shm_node_s *next;
 }ngx_http_dyabt_shm_node_t;
 
 typedef struct {
     ngx_shmtx_sh_t                 lock;
     ngx_int_t                      version;
-    ngx_int_t                      node_len;
-    ngx_http_dyabt_shm_node_t      node[NGX_HTTP_DYABT_SHM_NODE_SIZE];
+    ngx_http_dyabt_shm_node_t     *enable;
+    ngx_http_dyabt_shm_node_t     *disable;
 }ngx_http_dyabt_shm_t;
 
 typedef struct {
@@ -197,25 +198,24 @@ ngx_http_dyabt_interface(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static ngx_int_t
 ngx_http_dyabt_interface_handler(ngx_http_request_t *r)
 {
-    ngx_int_t             status;
+    ngx_int_t             status = NGX_HTTP_NOT_FOUND;
     ngx_str_t             rv = ngx_string("not found");
-    if(r->uri.len == 9 && ngx_strncasecmp(r->uri.data, (u_char*)"/testings",9) == 0){
+    if(r->uri.len >= 9 && ngx_strncasecmp(r->uri.data, (u_char*)"/testings",9) == 0){
         switch (r->method) {
             case NGX_HTTP_GET:
-                status = ngx_http_dyabt_do_get(r);
-                return status;
+                if(r->uri.len >= 9){
+                    return ngx_http_dyabt_do_get(r);
+                }
+                break;
             case NGX_HTTP_POST:
-                return ngx_http_dyabt_do_post(r);
-                return status;
+                if(r->uri.len == 9){
+                    return ngx_http_dyabt_do_post(r);
+                }
+                break;
             case NGX_HTTP_DELETE:
-                status = ngx_http_dyabt_do_delete(r);
-                return status;
-            default:
-                status = NGX_HTTP_NOT_FOUND;
+                return ngx_http_dyabt_do_delete(r);
                 break;
         }
-    }else{
-        status = NGX_HTTP_NOT_FOUND;
     }
     return ngx_http_dyabt_do_finish(r, status, &rv);
 }
@@ -270,8 +270,24 @@ ngx_http_dyabt_do_post(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_dyabt_do_delete(ngx_http_request_t *r)
 {
-    ngx_int_t             status;
-    ngx_str_t             result;
+    ngx_int_t                  status = NGX_HTTP_OK;
+    ngx_str_t                  result = ngx_string("success.");;
+    ngx_str_t                  domain;
+    ngx_http_dyabt_shm_node_t *p,*prev,*target;
+    if(r->uri.len == 9){
+        status = NGX_HTTP_NOT_FOUND;
+        ngx_str_set(&result,"not found domain.");
+        ngx_http_dyabt_do_finish(r,status,&result);
+        return NGX_ERROR;
+    }
+    if(r->uri.data[9] != '/'){
+        status = NGX_HTTP_BAD_REQUEST;
+        ngx_str_set(&result,"format error.");
+        ngx_http_dyabt_do_finish(r,status,&result);
+        return NGX_ERROR;
+    }
+    domain.data = r->uri.data + 10;
+    domain.len = r->uri.len - 10;
     if(ngx_http_dyabt_global_ctx.shm == NULL){
         status = NGX_HTTP_SERVICE_UNAVAILABLE;
         ngx_str_set(&result,"sherad memory not initialized.");
@@ -284,11 +300,31 @@ ngx_http_dyabt_do_delete(ngx_http_request_t *r)
         ngx_http_dyabt_do_finish(r,status,&result);
         return NGX_ERROR;
     }
-    ngx_http_dyabt_global_ctx.shm->node_len = 0;
-    ngx_http_dyabt_global_ctx.shm->version++;
+    p = ngx_http_dyabt_global_ctx.shm->enable;
+    target = NULL;
+    prev = NULL;
+    while(p){
+        if(p->domain_len==(ngx_int_t)domain.len && ngx_strncmp(p->domain,domain.data,domain.len)==0){
+            target = p;
+            break;
+        }
+        prev = p;
+        p = p->next;
+    }
+    if(target){
+        if(prev){
+            prev->next = target->next;
+        }else{
+            ngx_http_dyabt_global_ctx.shm->enable = target->next;
+        }
+        target->next = ngx_http_dyabt_global_ctx.shm->disable;
+        ngx_http_dyabt_global_ctx.shm->disable = target;
+        ngx_http_dyabt_global_ctx.shm->version++;
+    }else{
+        status = NGX_HTTP_NOT_FOUND;
+        ngx_str_set(&result,"not found.");
+    }
     ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
-    status = NGX_HTTP_OK;
-    ngx_str_set(&result,"success.");
     ngx_http_dyabt_do_finish(r,status,&result);
     return NGX_OK;
 }
@@ -298,7 +334,7 @@ ngx_http_dyabt_do_get(ngx_http_request_t *r)
 {
     u_char                    *p,*last;
     ngx_int_t                  status,node_index,case_index,size,len;
-    ngx_str_t                  result,domain,parser;
+    ngx_str_t                  result,domain,parser,target;
     ngx_http_dyabt_shm_t      *shm;
     ngx_http_dyabt_shm_node_t *node;
     if(ngx_http_dyabt_global_ctx.shm == NULL){
@@ -307,6 +343,18 @@ ngx_http_dyabt_do_get(ngx_http_request_t *r)
         ngx_http_dyabt_do_finish(r,status,&result);
         return NGX_ERROR;
     }
+    target.len = 0;
+    if( r->uri.len > 9 ){
+        if(r->uri.data[9] == '/'){
+            target.data = r->uri.data + 10;
+            target.len = r->uri.len - 10;
+        }else{
+            status = NGX_HTTP_BAD_REQUEST;
+            ngx_str_set(&result,"format error.");
+            ngx_http_dyabt_do_finish(r,status,&result);
+            return NGX_ERROR;
+        }
+    }
     if(!ngx_shmtx_trylock(&ngx_http_dyabt_global_ctx.lock)){
         status = NGX_HTTP_SERVICE_UNAVAILABLE;
         ngx_str_set(&result,"sherad memory lock can't locked.");
@@ -314,22 +362,28 @@ ngx_http_dyabt_do_get(ngx_http_request_t *r)
         return NGX_ERROR;
     }
     shm = ngx_http_dyabt_global_ctx.shm;
-    size = 512*shm->node_len;
+    size = NGX_HTTP_DYABT_SHM_NODE_SIZE*sizeof(ngx_http_dyabt_shm_node_t);
     result.len = 0;
     result.data = ngx_pnalloc(r->pool,size);
     p = result.data;
     last = p + size;
-    for(node_index=0;node_index<shm->node_len;++node_index){
-        node = &shm->node[node_index];
+    node = shm->enable;
+    while(node!=NULL){
         domain.len = node->domain_len;
         domain.data = node->domain;
         parser.len = node->parser_len;
         parser.data = node->parser;
-        p = ngx_snprintf(p,last-p,"%V,%V\n",&domain,&parser);
-        for(case_index=0;case_index<node->cases_len;++case_index){
-            p = ngx_snprintf(p,last-p,"%d,%d\n",node->cases[case_index].min,node->cases[case_index].max);
+        if(target.len == 0 || (domain.len == target.len && ngx_strncmp(domain.data,target.data,domain.len) == 0)){
+            p = ngx_snprintf(p,last-p,"%V,%V\n",&domain,&parser);
+            for(case_index=0;case_index<node->cases_len;++case_index){
+                p = ngx_snprintf(p,last-p,"%d,%d\n",node->cases[case_index].min,node->cases[case_index].max);
+            }
+            if(target.len != 0){
+                break;
+            }
+            p = ngx_snprintf(p,last-p,"---\n");
         }
-        p = ngx_snprintf(p,last-p,"---\n");
+        node = node->next;
     }
     result.len = p - result.data;
     ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
@@ -393,14 +447,15 @@ ngx_http_dyabt_parser_line(u_char **p,u_char *last,
 static void
 ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body)
 {
-    ngx_str_t                 domain,parser,response,min_str,max_str;
-    ngx_int_t                 result,status,min,max;
-    u_char                   *p;
-    ngx_http_dyabt_testing_t *testing;
-    ngx_http_dyabt_case_t    *testing_case;
-    ngx_hash_key_t           *domain_hash;
-    ngx_hash_init_t           hash_init;
-    ngx_http_dyabt_shm_node_t node;
+    ngx_str_t                  domain,parser,response,min_str,max_str;
+    ngx_int_t                  result,status,min,max;
+    u_char                    *p;
+    ngx_http_dyabt_testing_t  *testing;
+    ngx_http_dyabt_case_t     *testing_case;
+    ngx_hash_key_t            *domain_hash;
+    ngx_hash_init_t            hash_init;
+    ngx_http_dyabt_shm_node_t  node;
+    ngx_http_dyabt_shm_node_t *temp,*target;
     p = body->pos;
     ngx_memzero(&domain,sizeof(ngx_str_t));
     ngx_memzero(&parser,sizeof(ngx_str_t));
@@ -431,12 +486,36 @@ ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body)
     }
     if(ngx_http_dyabt_global_ctx.shm != NULL){
         if(ngx_shmtx_trylock(&ngx_http_dyabt_global_ctx.lock)){
-            ngx_http_dyabt_global_ctx.shm->version++;
-            ngx_http_dyabt_global_ctx.shm->node[ngx_http_dyabt_global_ctx.shm->node_len] = node;
-            ngx_http_dyabt_global_ctx.shm->node_len++;
+            temp = ngx_http_dyabt_global_ctx.shm->enable;
+            target = NULL;
+            while(temp){
+                if(temp->domain_len == node.domain_len && ngx_strncmp(temp->domain,node.domain,node.domain_len) == 0){
+                    target = temp;
+                    break;
+                }
+                temp = temp->next;
+            }
+            if(target != NULL){
+                node.next = target->next;
+                *target = node;
+                status = NGX_HTTP_OK;
+                ngx_str_set(&response,"success.");
+            }else{
+                if(ngx_http_dyabt_global_ctx.shm->disable != NULL){
+                    target = ngx_http_dyabt_global_ctx.shm->disable;
+                    ngx_http_dyabt_global_ctx.shm->disable = target->next;
+                    *target = node;
+                    target->next = ngx_http_dyabt_global_ctx.shm->enable;
+                    ngx_http_dyabt_global_ctx.shm->enable = target;
+                    ngx_http_dyabt_global_ctx.shm->version++;
+                    status = NGX_HTTP_OK;
+                    ngx_str_set(&response,"success.");
+                }else{
+                    status = NGX_HTTP_SERVICE_UNAVAILABLE;
+                    ngx_str_set(&response,"shared memory node full.");
+                }
+            }
             ngx_shmtx_unlock(&ngx_http_dyabt_global_ctx.lock);
-            status = NGX_HTTP_OK;
-            ngx_str_set(&response,"success.");
         }else{
             status = NGX_HTTP_SERVICE_UNAVAILABLE;
             ngx_str_set(&response,"shared memory lock can't locked.");
@@ -539,18 +618,20 @@ ngx_http_dyabt_read_body_from_file(ngx_http_request_t *r)
 static char *
 ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
 {
+    ngx_int_t                    node_index;
     ngx_shm_t                    shm;
     ngx_shm_zone_t              *shm_zone;
     ngx_http_dyabt_main_conf_t  *dmcf = conf;
-    ngx_str_t                   shm_name = ngx_string("ngx_http_dyabt_shm");
+    ngx_str_t                    shm_name = ngx_string("ngx_http_dyabt_shm");
+    ngx_http_dyabt_shm_node_t   *p;
     ngx_memzero(&ngx_http_dyabt_global_ctx,sizeof(ngx_http_dyabt_global_ctx_t));
     if(dmcf->enable == NGX_CONF_UNSET){
         dmcf->enable = 0;
     }
-    /* initializ sherad memory*/
+    /* initializ shared memory*/
     ngx_memzero(&shm,sizeof(ngx_shm_t));
     ngx_str_set(&shm.name,"ngx_http_dyabt_shm");
-    shm.size = sizeof(ngx_http_dyabt_shm_t);
+    shm.size = sizeof(ngx_http_dyabt_shm_t)+sizeof(ngx_http_dyabt_shm_node_t)*NGX_HTTP_DYABT_SHM_NODE_SIZE;
     shm.log = cf->log;
     if(ngx_shm_alloc(&shm)!=NGX_OK){
         return NGX_CONF_ERROR;
@@ -558,6 +639,15 @@ ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
     ngx_log_error(NGX_LOG_INFO,cf->log,0,"shared memory alloc success.");
     ngx_http_dyabt_global_ctx.shm = (ngx_http_dyabt_shm_t *)shm.addr;
 
+    /* initializ node link */
+    p = (ngx_http_dyabt_shm_node_t*)(shm.addr + sizeof(ngx_http_dyabt_shm_t));
+    ngx_http_dyabt_global_ctx.shm->disable = p;
+    ngx_http_dyabt_global_ctx.shm->enable = NULL;
+    for(node_index=0;node_index<NGX_HTTP_DYABT_SHM_NODE_SIZE;++node_index){
+        p->next = p+1;
+        ++p;
+    }
+    (p-1)->next = NULL;
     /* initializ lock */
     ngx_http_dyabt_global_ctx.shm->lock.lock = 0;
     if(ngx_shmtx_create(&ngx_http_dyabt_global_ctx.lock,
@@ -568,7 +658,6 @@ ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
     }
 
     /* initializ version */
-    ngx_http_dyabt_global_ctx.shm->node_len = 0;
     ngx_http_dyabt_global_ctx.shm->version = 0;
     ngx_http_dyabt_global_ctx.version = -1;
 
@@ -731,8 +820,8 @@ static ngx_int_t ngx_http_dyabt_make_conf(ngx_log_t *log)
                 return NGX_ERROR;
             }
             if(ngx_http_dyabt_global_ctx.shm != NULL){
-                for(domain_index=0;domain_index<ngx_http_dyabt_global_ctx.shm->node_len;++domain_index){
-                    node = &ngx_http_dyabt_global_ctx.shm->node[domain_index];
+                node = ngx_http_dyabt_global_ctx.shm->enable;
+                while(node!=NULL){
                     testing = ngx_pnalloc(
                         ngx_http_dyabt_global_ctx.pool,
                         sizeof(ngx_http_dyabt_testing_t));
@@ -783,6 +872,8 @@ static ngx_int_t ngx_http_dyabt_make_conf(ngx_log_t *log)
                     ngx_memcpy(domain_hash->key.data,node->domain,node->domain_len);
                     domain_hash->key_hash = ngx_hash_key(domain_hash->key.data,domain_hash->key.len);
                     domain_hash->value = testing;
+                    // next node
+                    node = node->next;
                 }
             }
             ngx_http_dyabt_global_ctx.version = ngx_http_dyabt_global_ctx.shm->version;
