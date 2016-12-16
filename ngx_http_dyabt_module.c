@@ -286,6 +286,7 @@ ngx_http_dyabt_do_delete(ngx_http_request_t *r)
         ngx_http_dyabt_do_finish(r,status,&result);
         return NGX_ERROR;
     }
+    // substring after /testings
     domain.data = r->uri.data + 10;
     domain.len = r->uri.len - 10;
     if(ngx_http_dyabt_global_ctx.shm == NULL){

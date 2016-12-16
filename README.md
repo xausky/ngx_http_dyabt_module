@@ -1,17 +1,28 @@
 # ngx_http_dyabt_module
 
-## Configure Reference
+可以动态修改分配规则的Nginx灰度发布模块，完全使用C语言实现，提供Restful风格的API，几乎不影响Nginx性能。
+
+## 指令参考
 
 ```
-worker_processes 1;
+dyabt_interface
+配置于location块内，作为一个Handler提供Restful API同时也是该模块的开关指令。
+
+dyabt_set <var> <domain>
+配置于location块内，使用domain对应的规则解析当前请求并将结果存到var变量内。
+```
+
+## Nginx 配置参考
+
+```
 events {
 }
 http {
     server {
         listen 4000;
         location / {
-			dyabt_set $domain $host;
-            return 200 $domain;
+			dyabt_set $ab $host;
+            return 200 $ab.$host;
         }
     }
     server {
@@ -23,7 +34,7 @@ http {
 }
 ```
 
-## API Reference
+## Restful API参考
 
 ```
 POST /testings
@@ -34,8 +45,13 @@ xausky.example.org,header_x_uid
 
 200 OK
 success
+```
 
-GET /testings
+提交一个规则到规则列表，以xausky.example.org为域，如果有相同域的规则将会覆盖规则，以header_x_uid为解析器，目前解析器只有header_x_uid将解析出HTTP Headers内的X-UID对应的值。
+下面三行为三个Case，Case描述一个最大最小范围，使用dyabt_set指令时模块将顺序进行匹配，返回从1开始的成功索引，如果全部失败或者没有对应域将返回0。
+
+```
+GET /testings[/<domain>]
 200 OK
 init.example.org,header_x_uid
 0,10
@@ -48,8 +64,33 @@ xausky.example.org,header_x_uid
 101,99999999
 ---
 <...>
+```
 
-DELETE /testings
+查询规则列表，将返回domain为域的规则列表，若没有domain段将返回所有规则这时以---行分割规则，
+
+```
+
+DELETE /testings/<domain>
 200 OK
 success
 ```
+
+删除domain对应的规则，dyabt_set指令对于不存在的域将返回0。
+
+## 性能测试
+系统：Linux Kernel 4.8.10
+
+线程数: 200
+
+服务器: Tengine 2.2.0
+
+处理器: Intel(R) Core(TM) i7-7500U CPU @ 2.70GHz
+
+Tengine 原生转发:
+![Tengine 原生转发](https://raw.githubusercontent.com/xausky/ngx_http_dyabt_module/master/doc/TengineNative.png)
+
+Tengine 使用本模块转发:
+![Tengine 原生转发](https://raw.githubusercontent.com/xausky/ngx_http_dyabt_module/master/doc/TengineDyabt.png)
+
+Tengine 使用本模块同时每秒更新一次规则:
+![Tengine 原生转发](https://raw.githubusercontent.com/xausky/ngx_http_dyabt_module/master/doc/TengineDyabt-Update.png)
