@@ -35,7 +35,7 @@ http {
 }
 ```
 1. 以HTTP请求Header Host即访问域名为域，将解析结果存放到`$ab`变量。
-2. 返回`$ab.$host`响应,时间使用中这里一般为proxy_pass。
+2. 返回`$ab.$host`响应,实际使用中这里一般为proxy_pass。
 
 ## Restful API参考
 
