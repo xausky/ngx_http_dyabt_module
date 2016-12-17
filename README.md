@@ -52,7 +52,7 @@ success
 
 1. 提交一个规则到规则列表。
 2. 以xausky.example.org为域，如果有相同域的规则将会覆盖规则。
-3. 以header_x_uid为解析器，目前解析器只有header_x_uid将解析出HTTP Headers内的X-UID对应的值。
+3. 以header_x_uid为解析器，header_x_uid将解析出HTTP Headers内的X-UID对应的值。
 4. 下面三个Case，Case描述一个闭区间，使用dyabt_set指令时模块将顺序进行匹配，返回从1开始的成功索引，如果全部失败或者没有对应域将返回0。
 
 ```
@@ -84,6 +84,25 @@ success
 
 1. 删除domain对应的规则。
 2. dyabt_set指令对于不存在的域将返回0。
+
+## 解析器
+
+### 已有解析器
+
+1. header_x_uid   该解析器将取出X-UID Header对应的值。
+2. remote_ip      该解析器将客户端IP转换为整型值，比如 0.0.1.0 -> 256
+
+### 实现新解析器
+
+1. C代码里面实现`typedef long long (*ngx_http_dyabt_parser_ptr_t)(ngx_http_request_t *r);`接口
+2. 在`ngx_http_dyabt_init_process`函数内注册，例如：
+
+```
+parser = ngx_array_push(&parsers);
+ngx_str_set(&parser->key,"header_x_uid");
+parser->key_hash = ngx_hash_key(parser->key.data,parser->key.len);
+parser->value = ngx_http_dyabt_uid_parser;
+```
 
 ## 性能测试
 系统：Linux Kernel 4.8.10
