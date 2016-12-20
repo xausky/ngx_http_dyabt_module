@@ -119,9 +119,6 @@ static void
 ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body);
 
 static ngx_int_t
-ngx_http_dyabt_init_shm_zone(ngx_shm_zone_t *shm_zone, void *data);
-
-static ngx_int_t
 ngx_http_dyabt_make_conf(ngx_log_t *log);
 
 static ngx_int_t
@@ -138,6 +135,9 @@ ngx_http_dyabt_ip_parser(ngx_http_request_t *r);
 
 long long
 ngx_http_dyabt_inet_aton(u_char *data, ngx_uint_t len);
+
+long long
+ngx_http_dyabt_atoll(u_char* data,ngx_int_t len);
 
 static ngx_http_dyabt_global_ctx_t ngx_http_dyabt_global_ctx;
 
@@ -343,7 +343,7 @@ static ngx_int_t
 ngx_http_dyabt_do_get(ngx_http_request_t *r)
 {
     u_char                    *p,*last;
-    ngx_int_t                  status,node_index,case_index,size,len;
+    ngx_int_t                  status,case_index,size;
     ngx_str_t                  result,domain,parser,target;
     ngx_http_dyabt_shm_t      *shm;
     ngx_http_dyabt_shm_node_t *node;
@@ -406,14 +406,11 @@ static void
 ngx_http_dyabt_body_handler(ngx_http_request_t *r)
 {
     ngx_buf_t               *body;
-    ngx_str_t                info;
     if (r->request_body->temp_file) {
         body = ngx_http_dyabt_read_body_from_file(r);
     } else {
         body = ngx_http_dyabt_read_body(r);
     }
-    info.len = body->last - body->pos;
-    info.data = (u_char *)body->pos;
     ngx_http_dyabt_parser_testing(r,body);
 }
 
@@ -458,13 +455,9 @@ static void
 ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body)
 {
     ngx_str_t                  domain,parser,response,min_str,max_str;
-    ngx_int_t                  result,status;
+    ngx_int_t                  status;
     long long                  min,max;
     u_char                    *p;
-    ngx_http_dyabt_testing_t  *testing;
-    ngx_http_dyabt_case_t     *testing_case;
-    ngx_hash_key_t            *domain_hash;
-    ngx_hash_init_t            hash_init;
     ngx_http_dyabt_shm_node_t  node;
     ngx_http_dyabt_shm_node_t *temp,*target;
     p = body->pos;
@@ -489,8 +482,8 @@ ngx_http_dyabt_parser_testing(ngx_http_request_t *r , ngx_buf_t *body)
     ngx_memcpy(node.parser,parser.data,parser.len);
     node.cases_len = 0;
     while(ngx_http_dyabt_parser_line(&p,body->last,&min_str,&max_str)==2){
-        min = ngx_atoll(min_str.data,min_str.len);
-        max = ngx_atoll(max_str.data,max_str.len);
+        min = ngx_http_dyabt_atoll(min_str.data,min_str.len);
+        max = ngx_http_dyabt_atoll(max_str.data,max_str.len);
         if(min==NGX_ERROR || max == NGX_ERROR){
             ngx_str_set(&response,"min or max is invalid number.");
             ngx_http_dyabt_do_finish(r,NGX_HTTP_BAD_REQUEST,&response);
@@ -551,25 +544,18 @@ ngx_http_dyabt_read_body(ngx_http_request_t *r)
     ngx_chain_t  *cl;
     cl = r->request_body->bufs;
     buf = cl->buf;
-
     if (cl->next == NULL) {
-
         return buf;
-
     } else {
-
         next = cl->next->buf;
         len = (buf->last - buf->pos) + (next->last - next->pos);
-
         body = ngx_create_temp_buf(r->pool, len);
         if (body == NULL) {
             return NULL;
         }
-
         body->last = ngx_cpymem(body->last, buf->pos, buf->last - buf->pos);
         body->last = ngx_cpymem(body->last, next->pos, next->last - next->pos);
     }
-
     return body;
 }
 
@@ -583,50 +569,34 @@ ngx_http_dyabt_read_body_from_file(ngx_http_request_t *r)
     ngx_chain_t  *cl;
     len = 0;
     cl = r->request_body->bufs;
-
     while (cl) {
-
         buf = cl->buf;
-
         if (buf->in_file) {
             len += buf->file_last - buf->file_pos;
-
         } else {
             len += buf->last - buf->pos;
         }
-
         cl = cl->next;
     }
     body = ngx_create_temp_buf(r->pool, len);
     if (body == NULL) {
         return NULL;
     }
-
     cl = r->request_body->bufs;
-
     while (cl) {
-
         buf = cl->buf;
-
         if (buf->in_file) {
-
             size = ngx_read_file(buf->file, body->last,
                                  buf->file_last - buf->file_pos, buf->file_pos);
-
             if (size == NGX_ERROR) {
                 return NULL;
             }
-
             body->last += size;
-
         } else {
-
             body->last = ngx_cpymem(body->last, buf->pos, buf->last - buf->pos);
         }
-
         cl = cl->next;
     }
-
     return body;
 }
 
@@ -636,9 +606,7 @@ ngx_http_dyabt_init_main_conf(ngx_conf_t *cf, void *conf)
 {
     ngx_int_t                    node_index;
     ngx_shm_t                    shm;
-    ngx_shm_zone_t              *shm_zone;
     ngx_http_dyabt_main_conf_t  *dmcf = conf;
-    ngx_str_t                    shm_name = ngx_string("ngx_http_dyabt_shm");
     ngx_http_dyabt_shm_node_t   *p;
     ngx_memzero(&ngx_http_dyabt_global_ctx,sizeof(ngx_http_dyabt_global_ctx_t));
     if(dmcf->enable == NGX_CONF_UNSET){
@@ -698,10 +666,8 @@ ngx_http_dyabt_create_main_conf(ngx_conf_t *cf)
 static char *
 ngx_http_dyabt_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    ngx_int_t                            index;
     ngx_str_t                           *value;
     ngx_http_variable_t                 *v;
-    ngx_str_t                           *domain;
     ngx_http_dyabt_set_conf_t           *scf;
     value = cf->args->elts;
     if (value[1].data[0] != '$') {
@@ -733,8 +699,6 @@ ngx_http_dyabt_value(ngx_conf_t *cf, ngx_http_dyabt_set_conf_t *scf, ngx_str_t *
 {
     ngx_int_t                              n;
     ngx_http_script_compile_t              sc;
-    ngx_http_script_value_code_t          *val;
-    ngx_http_script_complex_value_code_t  *complex;
     n = ngx_http_script_variables_count(value);
     if (n) {
         ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
@@ -807,7 +771,6 @@ static ngx_int_t ngx_http_dyabt_make_conf(ngx_log_t *log)
     ngx_pool_t                 *temp_pool;
     ngx_hash_init_t             hash_init;
     ngx_int_t                   result;
-    ngx_int_t                   domain_index;
     ngx_int_t                   cese_index;
     ngx_hash_key_t             *domain_hash;
     ngx_http_dyabt_case_t      *testing_case;
@@ -944,8 +907,6 @@ static ngx_int_t ngx_http_dyabt_init_process(ngx_cycle_t *cycle)
     ngx_int_t                    result;
     ngx_pool_t                  *temp_pool;
     ngx_hash_key_t              *parser;
-    ngx_shm_zone_t              *shm_zone;
-    ngx_shm_t                    shm;
     ngx_array_t                  parsers;
     ngx_hash_init_t              parser_hash_init;
     ngx_http_dyabt_main_conf_t  *dmcf;
@@ -1040,7 +1001,7 @@ ngx_http_dyabt_uid_parser(ngx_http_request_t *r){
     if(h==NULL){
         return -1;
     }
-    return ngx_atoll(h->value.data,h->value.len);
+    return ngx_http_dyabt_atoll(h->value.data,h->value.len);
 }
 
 ngx_int_t
@@ -1102,6 +1063,23 @@ ngx_http_dyabt_ip_parser(ngx_http_request_t *r){
     result = ngx_http_dyabt_inet_aton(ip.data,ip.len);
     if(result == NGX_ERROR){
         return NGX_ERROR;
+    }
+    return result;
+}
+
+long long
+ngx_http_dyabt_atoll(u_char* data,ngx_int_t len)
+{
+    long long         result = 0;
+    u_char           *last = data+len;
+    while(data<last){
+        if(*data >= '0' && *data <= '9'){
+            result *= 10;
+            result += *data - '0';
+        }else{
+            return NGX_ERROR;
+        }
+        ++data;
     }
     return result;
 }
