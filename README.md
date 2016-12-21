@@ -4,6 +4,8 @@
 
 ### 推荐结合ngx_http_dyups_module使用
 
+Tengine 2.2.0和Nginx 1.10.2上编译测试通过。
+
 ## 指令参考
 1 `dyabt_interface`
 
